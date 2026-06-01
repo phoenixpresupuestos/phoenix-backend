@@ -1,115 +1,10 @@
-root@srv1475878:~# docker exec $(docker ps -q --filter name=phai-api) cat /app/src/index.js
-require('dotenv').config();
-const express = require('express');
-const helmet = require('helmet');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
-const cookieParser = require('cookie-parser');
-const logger = require('./services/logger');
-
-const app = express();
-
-// ─────────────────────────────────────────
-// SEGURIDAD — Headers HTTP
-// ─────────────────────────────────────────
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc:  ["'self'"],
-      styleSrc:   ["'self'"],
-      imgSrc:     ["'self'", 'data:'],
-    },
-  },
-  hsts: {
-    maxAge:            31536000,  // 1 año
-    includeSubDomains: true,
-    preload:           true,
-  },
-}));
-
-// ─────────────────────────────────────────
-// CORS — solo el dominio del frontend
-// ─────────────────────────────────────────
-app.use(cors({
-  origin:      process.env.FRONTEND_URL,
-  credentials: true,   // necesario para cookies
-  methods:     ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
-
-// ─────────────────────────────────────────
-// RATE LIMITING global
-// ─────────────────────────────────────────
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,  // 15 minutos
-  max:      200,
-  standardHeaders: true,
-  legacyHeaders:   false,
-  message: { error: 'Demasiadas solicitudes. Espera unos minutos.' },
-});
-app.use(globalLimiter);
-
-// ─────────────────────────────────────────
-// BODY PARSERS
-// IMPORTANTE: /pagos/webhook necesita body raw
-// ─────────────────────────────────────────
-app.use('/pagos/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: false }));
-app.use(cookieParser());
-
-// ─────────────────────────────────────────
-// Proxy trust (EasyPanel/nginx)
-// ─────────────────────────────────────────
-app.set('trust proxy', 1);
-
-// ─────────────────────────────────────────
-// RUTAS
-// ─────────────────────────────────────────
-app.use('/auth',         require('./routes/auth'));
-app.use('/pagos',        require('./routes/pagos'));
-app.use('/presupuestos', require('./routes/presupuestos'));
-
-// ─────────────────────────────────────────
-// Health check
-// ─────────────────────────────────────────
-app.get('/health', (req, res) => {
-  res.json({ ok: true, env: process.env.NODE_ENV, ts: new Date().toISOString() });
-});
-
-// ─────────────────────────────────────────
-// 404
-// ─────────────────────────────────────────
-app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint no encontrado' });
-});
-
-// ─────────────────────────────────────────
-// Error handler global
-// ─────────────────────────────────────────
-app.use((err, req, res, next) => {
-  logger.error('Error no controlado', { error: err.message, stack: err.stack });
-  res.status(500).json({ error: 'Error interno del servidor' });
-});
-
-// ─────────────────────────────────────────
-// ARRANCAR
-// ─────────────────────────────────────────
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  logger.info(`Phoenix Backend arrancado`, {
-    port: PORT,
-    env:  process.env.NODE_ENV,
-  });
-});
-
-module.exports = app;
-root@srv1475878:~# docker exec $(docker ps -q --filter name=phai-api) cat /app/src/routes/auth.js
 const express = require('express');
 const bcrypt = require('bcrypt');
 const { body, validationResult } = require('express-validator');
 const rateLimit = require('express-rate-limit');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const db = require('../db');
 const jwtService = require('../services/jwt');
 const { autenticar } = require('../middleware/auth');
@@ -124,6 +19,31 @@ const authLimiter = rateLimit({
   message: { error: 'Demasiados intentos. Espera 15 minutos.' },
   standardHeaders: true,
   legacyHeaders: false,
+});
+
+// ─────────────────────────────────────────
+// MULTER — configuración para logos
+// ─────────────────────────────────────────
+const logosDir = '/home/phoenix-logos';
+if (!fs.existsSync(logosDir)) fs.mkdirSync(logosDir, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, logosDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `logo_${req.usuario.id}${ext}`);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB máximo
+  fileFilter: (req, file, cb) => {
+    const allowed = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowed.includes(ext)) cb(null, true);
+    else cb(new Error('Solo se permiten imágenes JPG, PNG, GIF o WEBP'));
+  }
 });
 
 // ─────────────────────────────────────────
@@ -163,23 +83,15 @@ router.post('/registro',
       const rounds = parseInt(process.env.BCRYPT_ROUNDS) || 12;
       const passwordHash = await bcrypt.hash(password, rounds);
 
-      // Crear usuario — 3 créditos gratis de bienvenida
+      // Crear usuario — sin créditos de bienvenida, acceso libre para explorar
       const { rows } = await db.query(
         `INSERT INTO usuarios (email, password_hash, nombre, empresa, nif, telefono, creditos)
-         VALUES ($1, $2, $3, $4, $5, $6, 3)
+         VALUES ($1, $2, $3, $4, $5, $6, 0)
          RETURNING id, email, nombre, creditos`,
         [email, passwordHash, nombre, empresa || null, nif || null, telefono || null]
       );
 
       const usuario = rows[0];
-
-      // Registrar créditos de bienvenida
-      await db.query(
-        `INSERT INTO movimientos_creditos 
-         (usuario_id, tipo, cantidad, saldo_anterior, saldo_posterior, descripcion)
-         VALUES ($1, 'bonus', 3, 0, 3, 'Créditos de bienvenida')`,
-        [usuario.id]
-      );
 
       // Generar tokens
       const accessToken = jwtService.generarAccessToken(usuario);
@@ -208,7 +120,7 @@ router.post('/registro',
           nombre:   usuario.nombre,
           creditos: usuario.creditos,
         },
-        mensaje: '¡Registro completado! Tienes 3 créditos de bienvenida.',
+        mensaje: '¡Registro completado! Explora la herramienta y adquiere un presupuesto cuando quieras.',
       });
 
     } catch (err) {
@@ -346,7 +258,7 @@ router.post('/logout', autenticar, async (req, res) => {
 router.get('/perfil', autenticar, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT id, email, nombre, empresa, nif, telefono, creditos, creado_en
+      `SELECT id, email, nombre, empresa, nif, telefono, direccion, logo_url, creditos, creado_en
        FROM usuarios WHERE id = $1`,
       [req.usuario.id]
     );
@@ -357,5 +269,88 @@ router.get('/perfil', autenticar, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────
+// PUT /auth/perfil — actualizar datos del usuario
+// ─────────────────────────────────────────
+router.put('/perfil', autenticar, [
+  body('nombre').optional().trim().isLength({ min: 2, max: 255 }),
+  body('empresa').optional().trim().isLength({ max: 255 }),
+  body('nif').optional().trim().isLength({ max: 20 }),
+  body('telefono').optional().trim().isLength({ max: 20 }),
+  body('direccion').optional().trim().isLength({ max: 500 }),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errores: errors.array() });
+  }
+
+  const { nombre, empresa, nif, telefono, direccion } = req.body;
+
+  try {
+    const { rows } = await db.query(
+      `UPDATE usuarios 
+       SET nombre    = COALESCE($1, nombre),
+           empresa   = COALESCE($2, empresa),
+           nif       = COALESCE($3, nif),
+           telefono  = COALESCE($4, telefono),
+           direccion = COALESCE($5, direccion)
+       WHERE id = $6
+       RETURNING id, email, nombre, empresa, nif, telefono, direccion, logo_url, creditos`,
+      [nombre || null, empresa || null, nif || null, telefono || null, direccion || null, req.usuario.id]
+    );
+
+    return res.json(rows[0]);
+  } catch (err) {
+    logger.error('Error actualizando perfil', { error: err.message });
+    return res.status(500).json({ error: 'Error interno' });
+  }
+});
+
+// ─────────────────────────────────────────
+// POST /auth/logo — subir logo del usuario
+// ─────────────────────────────────────────
+router.post('/logo', autenticar, upload.single('logo'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No se ha subido ningún archivo' });
+  }
+
+  const ext = path.extname(req.file.originalname).toLowerCase();
+  const logoUrl = `/logos/logo_${req.usuario.id}${ext}`;
+
+  try {
+    await db.query(
+      'UPDATE usuarios SET logo_url = $1 WHERE id = $2',
+      [logoUrl, req.usuario.id]
+    );
+
+    logger.info('Logo actualizado', { usuario_id: req.usuario.id, logo: logoUrl });
+    return res.json({ logo_url: logoUrl, mensaje: 'Logo actualizado correctamente' });
+  } catch (err) {
+    logger.error('Error guardando logo', { error: err.message });
+    return res.status(500).json({ error: 'Error interno' });
+  }
+});
+
+// ─────────────────────────────────────────
+// DELETE /auth/logo — eliminar logo
+// ─────────────────────────────────────────
+router.delete('/logo', autenticar, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      'SELECT logo_url FROM usuarios WHERE id = $1',
+      [req.usuario.id]
+    );
+
+    if (rows[0]?.logo_url) {
+      const filePath = `/home/phoenix-logos${rows[0].logo_url.replace('/logos', '')}`;
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+
+    await db.query('UPDATE usuarios SET logo_url = NULL WHERE id = $1', [req.usuario.id]);
+    return res.json({ mensaje: 'Logo eliminado' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Error interno' });
+  }
+});
+
 module.exports = router;
-root@srv1475878:~# 
