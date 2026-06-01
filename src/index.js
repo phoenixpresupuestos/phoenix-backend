@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
+const path = require('path');
 const logger = require('./services/logger');
 
 const app = express();
@@ -17,7 +18,7 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc:  ["'self'"],
       styleSrc:   ["'self'"],
-      imgSrc:     ["'self'", 'data:'],
+      imgSrc:     ["'self'", 'data:', 'https:'],
     },
   },
   hsts: {
@@ -57,6 +58,11 @@ app.use('/pagos/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
+
+// ─────────────────────────────────────────
+// LOGOS — archivos estáticos
+// ─────────────────────────────────────────
+app.use('/logos', express.static('/home/phoenix-logos'));
 
 // ─────────────────────────────────────────
 // Proxy trust (EasyPanel/nginx)
