@@ -11,11 +11,26 @@ const router = express.Router();
 // Nunca exponer precios en el cliente
 // ─────────────────────────────────────────
 const PAQUETES = {
-  '20_creditos': {
-    precio_id:    process.env.STRIPE_PRICE_20_CREDITOS,
-    creditos:     20,
-    importe:      4000,   // 40.00 € en céntimos
-    descripcion:  '20 créditos — Phoenix Presupuestos',
+  'vivienda_normal': {
+    precio_id:   process.env.STRIPE_PRICE_VIVIENDA_NORMAL,
+    creditos:    5,
+    importe:     3000,   // 30.00 € en céntimos
+    descripcion: 'Vivienda Normal — hasta 5 estancias (5 créditos)',
+    modo:        'payment',
+  },
+  'vivienda_grande': {
+    precio_id:   process.env.STRIPE_PRICE_VIVIENDA_GRANDE,
+    creditos:    7,
+    importe:     5000,   // 50.00 € en céntimos
+    descripcion: 'Vivienda Grande — hasta 7 estancias (7 créditos)',
+    modo:        'payment',
+  },
+  'acceso_libre': {
+    precio_id:   process.env.STRIPE_PRICE_ACCESO_LIBRE,
+    creditos:    null,   // ilimitados — gestionado por suscripción activa
+    importe:     7500,   // 75.00 € en céntimos
+    descripcion: 'Acceso Libre — créditos ilimitados (suscripción mensual)',
+    modo:        'subscription',
   },
 };
 
@@ -23,48 +38,59 @@ const PAQUETES = {
 // POST /pagos/checkout — crear sesión de pago Stripe
 // ─────────────────────────────────────────
 router.post('/checkout', autenticar, async (req, res) => {
-  const { paquete = '20_creditos' } = req.body;
+  const { paquete } = req.body;
 
-  if (!PAQUETES[paquete]) {
-    return res.status(400).json({ error: 'Paquete de créditos no válido' });
+  if (!paquete || !PAQUETES[paquete]) {
+    return res.status(400).json({
+      error: 'Plan no válido. Opciones: vivienda_normal, vivienda_grande, acceso_libre',
+    });
   }
 
   const pkg = PAQUETES[paquete];
 
   try {
-    // Obtener datos del usuario
     const { rows } = await db.query(
-      'SELECT email, nombre FROM usuarios WHERE id = $1',
+      'SELECT email, nombre, stripe_subscription_id FROM usuarios WHERE id = $1',
       [req.usuario.id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
 
     const usuario = rows[0];
 
-    const session = await stripe.checkout.sessions.create({
-      mode:                 'payment',
+    // Evitar doble suscripción activa
+    if (paquete === 'acceso_libre' && usuario.stripe_subscription_id) {
+      return res.status(409).json({ error: 'Ya tienes una suscripción activa' });
+    }
+
+    const sessionParams = {
       payment_method_types: ['card'],
       customer_email:       usuario.email,
-      line_items: [{
-        price:    pkg.precio_id,
-        quantity: 1,
-      }],
       metadata: {
-        usuario_id:    req.usuario.id,
-        paquete:       paquete,
-        creditos:      String(pkg.creditos),
+        usuario_id: String(req.usuario.id),
+        paquete,
+        creditos:   pkg.creditos !== null ? String(pkg.creditos) : 'ilimitados',
       },
-      success_url: `${process.env.FRONTEND_URL}/pago/exito?session={CHECKOUT_SESSION_ID}`,
-      cancel_url:  `${process.env.FRONTEND_URL}/pago/cancelado`,
-      payment_intent_data: {
-        metadata: {
-          usuario_id: req.usuario.id,
-          paquete:    paquete,
-        },
-      },
-      // Caducidad de 30 minutos
-      expires_at: Math.floor(Date.now() / 1000) + 1800,
-    });
+      success_url: `${process.env.FRONTEND_URL}/pago-ok.html?session={CHECKOUT_SESSION_ID}`,
+      cancel_url:  `${process.env.FRONTEND_URL}/phai-app.html`,
+    };
+
+    if (pkg.modo === 'payment') {
+      sessionParams.mode = 'payment';
+      sessionParams.line_items = [{ price: pkg.precio_id, quantity: 1 }];
+      sessionParams.expires_at = Math.floor(Date.now() / 1000) + 1800; // 30 min
+      sessionParams.payment_intent_data = {
+        metadata: { usuario_id: String(req.usuario.id), paquete },
+      };
+    } else {
+      // suscripción
+      sessionParams.mode = 'subscription';
+      sessionParams.line_items = [{ price: pkg.precio_id, quantity: 1 }];
+      sessionParams.subscription_data = {
+        metadata: { usuario_id: String(req.usuario.id), paquete },
+      };
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
 
     // Registrar pago pendiente
     await db.query(
@@ -95,118 +121,138 @@ router.post('/checkout', autenticar, async (req, res) => {
 
 // ─────────────────────────────────────────
 // POST /pagos/webhook — recibir eventos de Stripe
-// IMPORTANTE: este endpoint usa el body RAW (sin JSON.parse)
+// IMPORTANTE: body RAW (configurado en index.js)
 // ─────────────────────────────────────────
-router.post('/webhook',
-  express.raw({ type: 'application/json' }),  // body RAW para verificar firma
-  async (req, res) => {
-    const sig = req.headers['stripe-signature'];
+router.post('/webhook', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
 
-    let event;
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-    } catch (err) {
-      logger.warn('Webhook Stripe inválido', { error: err.message });
-      return res.status(400).json({ error: `Webhook inválido: ${err.message}` });
-    }
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    logger.warn('Webhook Stripe inválido', { error: err.message });
+    return res.status(400).json({ error: `Webhook inválido: ${err.message}` });
+  }
 
-    // Procesar evento
-    try {
-      switch (event.type) {
+  try {
+    switch (event.type) {
 
-        case 'checkout.session.completed': {
-          const session = event.data.object;
+      // ── Pago único completado ─────────────────────────────
+      case 'checkout.session.completed': {
+        const session = event.data.object;
 
-          if (session.payment_status !== 'paid') break;
+        if (session.mode === 'payment' && session.payment_status !== 'paid') break;
 
-          const usuarioId = session.metadata?.usuario_id;
-          const creditos  = parseInt(session.metadata?.creditos) || 0;
+        const usuarioId = session.metadata?.usuario_id;
+        const paquete   = session.metadata?.paquete;
+        const pkg       = PAQUETES[paquete];
 
-          if (!usuarioId || !creditos) {
-            logger.error('Webhook: metadata incompleta', { session_id: session.id });
-            break;
-          }
+        if (!usuarioId || !pkg) {
+          logger.error('Webhook: metadata incompleta', { session_id: session.id });
+          break;
+        }
 
-          // Verificar que no se ha procesado ya (idempotencia)
-          const { rows: pago } = await db.query(
-            `SELECT estado FROM pagos WHERE stripe_session_id = $1`,
-            [session.id]
-          );
+        // Idempotencia
+        const { rows: pago } = await db.query(
+          `SELECT estado FROM pagos WHERE stripe_session_id = $1`,
+          [session.id]
+        );
+        if (pago.length > 0 && pago[0].estado === 'completado') {
+          logger.info('Webhook: pago ya procesado (idempotente)', { session_id: session.id });
+          break;
+        }
 
-          if (pago.length > 0 && pago[0].estado === 'completado') {
-            logger.info('Webhook: pago ya procesado (idempotente)', { session_id: session.id });
-            break;
-          }
-
-          // Transacción atómica: actualizar pago + añadir créditos
+        if (session.mode === 'payment') {
+          // Pago único — añadir créditos
+          const creditos = pkg.creditos;
           await db.transaction(async (client) => {
-            // Actualizar pago
             await client.query(
-              `UPDATE pagos SET
-                estado = 'completado',
-                stripe_payment_intent = $1,
-                completado_en = NOW()
+              `UPDATE pagos SET estado = 'completado', stripe_payment_intent = $1, completado_en = NOW()
                WHERE stripe_session_id = $2`,
               [session.payment_intent, session.id]
             );
-
-            // Añadir créditos con función atómica
             await client.query(
               `SELECT anadir_creditos($1, $2, 'compra', $3, $4)`,
-              [
-                usuarioId,
-                creditos,
-                session.id,
-                `Compra de ${creditos} créditos vía Stripe`,
-              ]
+              [usuarioId, creditos, session.id, `Compra ${pkg.descripcion}`]
             );
           });
+          logger.info('Pago único completado — créditos añadidos', { usuarioId, creditos, session_id: session.id });
 
-          logger.info('Pago completado — créditos añadidos', {
-            usuario_id: usuarioId,
-            creditos,
-            session_id: session.id,
+        } else if (session.mode === 'subscription') {
+          // Suscripción — guardar subscription_id, marcar acceso libre
+          const subscriptionId = session.subscription;
+          await db.transaction(async (client) => {
+            await client.query(
+              `UPDATE pagos SET estado = 'completado', completado_en = NOW()
+               WHERE stripe_session_id = $1`,
+              [session.id]
+            );
+            await client.query(
+              `UPDATE usuarios SET stripe_subscription_id = $1, creditos = -1
+               WHERE id = $2`,
+              [subscriptionId, usuarioId]
+            );
+            // creditos = -1 significa acceso ilimitado — verificar en consumir_creditos()
           });
-          break;
+          logger.info('Suscripción activada — acceso libre', { usuarioId, subscriptionId });
         }
-
-        case 'checkout.session.expired': {
-          const session = event.data.object;
-          await db.query(
-            `UPDATE pagos SET estado = 'fallido' WHERE stripe_session_id = $1`,
-            [session.id]
-          );
-          break;
-        }
-
-        case 'charge.dispute.created': {
-          // Alerta de contracargo — log inmediato
-          logger.warn('CONTRACARGO CREADO', {
-            charge_id: event.data.object.charge,
-            amount:    event.data.object.amount,
-          });
-          break;
-        }
-
-        default:
-          logger.debug('Evento Stripe no manejado', { type: event.type });
+        break;
       }
 
-      return res.json({ recibido: true });
+      // ── Suscripción cancelada ─────────────────────────────
+      case 'customer.subscription.deleted': {
+        const subscription = event.data.object;
+        const { rows } = await db.query(
+          `SELECT id FROM usuarios WHERE stripe_subscription_id = $1`,
+          [subscription.id]
+        );
+        if (rows.length > 0) {
+          await db.query(
+            `UPDATE usuarios SET stripe_subscription_id = NULL, creditos = 0 WHERE id = $1`,
+            [rows[0].id]
+          );
+          logger.info('Suscripción cancelada — acceso libre revocado', { usuario_id: rows[0].id });
+        }
+        break;
+      }
 
-    } catch (err) {
-      logger.error('Error procesando webhook', { type: event.type, error: err.message });
-      return res.status(500).json({ error: 'Error procesando evento' });
+      // ── Sesión expirada ───────────────────────────────────
+      case 'checkout.session.expired': {
+        const session = event.data.object;
+        await db.query(
+          `UPDATE pagos SET estado = 'fallido' WHERE stripe_session_id = $1`,
+          [session.id]
+        );
+        break;
+      }
+
+      // ── Contracargo ───────────────────────────────────────
+      case 'charge.dispute.created': {
+        logger.warn('CONTRACARGO CREADO', {
+          charge_id: event.data.object.charge,
+          amount:    event.data.object.amount,
+        });
+        break;
+      }
+
+      default:
+        logger.debug('Evento Stripe no manejado', { type: event.type });
     }
+
+    return res.json({ recibido: true });
+
+  } catch (err) {
+    logger.error('Error procesando webhook', { type: event.type, error: err.message });
+    return res.status(500).json({ error: 'Error procesando evento' });
   }
-);
+});
 
 // ─────────────────────────────────────────
-// GET /pagos/historial — historial de pagos
+// GET /pagos/historial
 // ─────────────────────────────────────────
 router.get('/historial', autenticar, async (req, res) => {
   try {
@@ -228,18 +274,25 @@ router.get('/historial', autenticar, async (req, res) => {
 router.get('/creditos', autenticar, async (req, res) => {
   try {
     const { rows } = await db.query(
-      'SELECT creditos FROM usuarios WHERE id = $1',
+      'SELECT creditos, stripe_subscription_id FROM usuarios WHERE id = $1',
       [req.usuario.id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
-    return res.json({ creditos: rows[0].creditos });
+
+    const { creditos, stripe_subscription_id } = rows[0];
+    const acceso_libre = !!stripe_subscription_id;
+
+    return res.json({
+      creditos:     acceso_libre ? null : creditos,
+      acceso_libre,
+    });
   } catch (err) {
     return res.status(500).json({ error: 'Error al obtener créditos' });
   }
 });
 
 // ─────────────────────────────────────────
-// GET /pagos/movimientos — historial de créditos
+// GET /pagos/movimientos
 // ─────────────────────────────────────────
 router.get('/movimientos', autenticar, async (req, res) => {
   try {
@@ -253,6 +306,38 @@ router.get('/movimientos', autenticar, async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: 'Error al obtener movimientos' });
   }
+});
+
+// ─────────────────────────────────────────
+// GET /pagos/planes — info pública de planes
+// ─────────────────────────────────────────
+router.get('/planes', (req, res) => {
+  return res.json([
+    {
+      id:          'vivienda_normal',
+      nombre:      'Vivienda Normal',
+      descripcion: 'Hasta 5 estancias',
+      precio:      30,
+      creditos:    5,
+      tipo:        'pago_unico',
+    },
+    {
+      id:          'vivienda_grande',
+      nombre:      'Vivienda Grande',
+      descripcion: 'Hasta 7 estancias',
+      precio:      50,
+      creditos:    7,
+      tipo:        'pago_unico',
+    },
+    {
+      id:          'acceso_libre',
+      nombre:      'Acceso Libre',
+      descripcion: 'Créditos ilimitados',
+      precio:      75,
+      creditos:    null,
+      tipo:        'suscripcion_mensual',
+    },
+  ]);
 });
 
 module.exports = router;
