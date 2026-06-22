@@ -32,7 +32,7 @@ app.use(helmet({
 // CORS — solo el dominio del frontend
 // ─────────────────────────────────────────
 app.use(cors({
-  origin:      process.env.FRONTEND_URL,
+  origin: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',') : [],
   credentials: true,   // necesario para cookies
   methods:     ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
