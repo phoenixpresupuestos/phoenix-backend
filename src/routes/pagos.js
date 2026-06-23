@@ -70,8 +70,8 @@ router.post('/checkout', autenticar, async (req, res) => {
         paquete,
         creditos:   pkg.creditos !== null ? String(pkg.creditos) : 'ilimitados',
       },
-      success_url: `${process.env.FRONTEND_URL}/pago-ok.html?session={CHECKOUT_SESSION_ID}`,
-      cancel_url:  `${process.env.FRONTEND_URL}/phai-app.html`,
+      success_url: `${process.env.APP_URL}/pago-ok.html?session={CHECKOUT_SESSION_ID}`,
+      cancel_url:  `${process.env.APP_URL}/phai-app.html`,
     };
 
     if (pkg.modo === 'payment') {
