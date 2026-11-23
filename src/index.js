@@ -75,6 +75,7 @@ app.set('trust proxy', 1);
 app.use('/auth',         require('./routes/auth'));
 app.use('/pagos',        require('./routes/pagos'));
 app.use('/presupuestos', require('./routes/presupuestos'));
+app.use('/verificaciones', require('./routes/verificaciones'));
 
 // ─────────────────────────────────────────
 // Health check
