@@ -13,16 +13,16 @@ const router = express.Router();
 const PAQUETES = {
   'vivienda_normal': {
     precio_id:   process.env.STRIPE_PRICE_VIVIENDA_NORMAL,
-    creditos:    5,
+    creditos:    12,
     importe:     3000,   // 30.00 € en céntimos
-    descripcion: 'Vivienda Normal — hasta 5 estancias (5 créditos)',
+    descripcion: 'Vivienda Normal — hasta 12 estancias (12 créditos)',
     modo:        'payment',
   },
   'vivienda_grande': {
     precio_id:   process.env.STRIPE_PRICE_VIVIENDA_GRANDE,
-    creditos:    7,
+    creditos:    25,
     importe:     5000,   // 50.00 € en céntimos
-    descripcion: 'Vivienda Grande — hasta 7 estancias (7 créditos)',
+    descripcion: 'Vivienda Grande — hasta 25 estancias (25 créditos)',
     modo:        'payment',
   },
   'acceso_libre': {
@@ -316,17 +316,17 @@ router.get('/planes', (req, res) => {
     {
       id:          'vivienda_normal',
       nombre:      'Vivienda Normal',
-      descripcion: 'Hasta 5 estancias',
+      descripcion: 'Hasta 12 estancias',
       precio:      30,
-      creditos:    5,
+      creditos:    12,
       tipo:        'pago_unico',
     },
     {
       id:          'vivienda_grande',
       nombre:      'Vivienda Grande',
-      descripcion: 'Hasta 7 estancias',
+      descripcion: 'Hasta 25 estancias',
       precio:      50,
-      creditos:    7,
+      creditos:    25,
       tipo:        'pago_unico',
     },
     {
