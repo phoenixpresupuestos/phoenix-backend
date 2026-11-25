@@ -1,4 +1,4 @@
-const express = require('express');
+phoenix-backendconst express = require('express');
 const { body, validationResult } = require('express-validator');
 const rateLimit = require('express-rate-limit');
 const db = require('../db');
@@ -59,27 +59,8 @@ router.post('/',
     } = req.body;
 
     try {
-      // Consumir créditos de forma atómica
-      const { rows: resultado } = await db.query(
-        `SELECT * FROM consumir_creditos($1, $2, NULL, $3)`,
-        [
-          req.usuario.id,
-          estancias,
-          `Presupuesto con ${estancias} estancia(s)`,
-        ]
-      );
-
-      const r = resultado[0];
-
-      if (!r.ok) {
-        return res.status(402).json({
-          error: r.mensaje,
-          creditos_actuales: r.saldo_nuevo,
-          code: 'CREDITOS_INSUFICIENTES',
-        });
-      }
-
-      // Crear presupuesto
+      // Guardar presupuesto SIN consumir créditos.
+      // El cobro se realiza al generar el resumen (POST /pagos/consumir), no al guardar.
       const referencia = await generarReferencia();
 
       const { rows: pres } = await db.query(
@@ -103,24 +84,14 @@ router.post('/',
         ]
       );
 
-      // Actualizar referencia en movimiento de créditos
-      await db.query(
-        `UPDATE movimientos_creditos SET referencia = $1
-         WHERE usuario_id = $2 AND tipo = 'consumo'
-         ORDER BY creado_en DESC LIMIT 1`,
-        [pres[0].id, req.usuario.id]
-      );
-
       logger.info('Presupuesto guardado', {
         usuario_id:  req.usuario.id,
         presupuesto: pres[0].id,
         estancias,
-        creditos_restantes: r.saldo_nuevo,
       });
 
       return res.status(201).json({
-        presupuesto:        pres[0],
-        creditos_restantes: r.saldo_nuevo,
+        presupuesto: pres[0],
       });
 
     } catch (err) {
