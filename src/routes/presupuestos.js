@@ -112,7 +112,8 @@ router.get('/', autenticar, async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT id, referencia, total_estimado, estancias, nivel, calidad,
-              cliente_nombre, cliente_email, pdf_generado, creado_en
+              cliente_nombre, cliente_email, pdf_generado, creado_en,
+              datos->>'clienteDir' AS obra, datos->>'tipoPresupuesto' AS tipo
        FROM presupuestos
        WHERE usuario_id = $1
        ORDER BY creado_en DESC
