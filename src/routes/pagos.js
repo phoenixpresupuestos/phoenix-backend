@@ -340,4 +340,55 @@ router.get('/planes', (req, res) => {
   ]);
 });
 
+// ─────────────────────────────────────────
+// POST /pagos/consumir — descontar créditos al generar un presupuesto
+// Cantidad = nº de estancias. Acceso libre no descuenta.
+// ─────────────────────────────────────────
+router.post('/consumir', autenticar, async (req, res) => {
+  const estancias = parseInt(req.body.estancias, 10);
+  if (!estancias || estancias < 1) {
+    return res.status(400).json({ error: 'Número de estancias no válido' });
+  }
+  try {
+    const { rows } = await db.query(
+      'SELECT creditos, stripe_subscription_id FROM usuarios WHERE id = $1',
+      [req.usuario.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    // Acceso libre (suscripción activa): no se descuenta
+    if (rows[0].stripe_subscription_id) {
+      return res.json({ ok: true, acceso_libre: true, creditos: null });
+    }
+
+    // Descuento atómico: solo si hay saldo suficiente
+    const { rows: upd } = await db.query(
+      `UPDATE usuarios SET creditos = creditos - $1
+       WHERE id = $2 AND stripe_subscription_id IS NULL AND creditos >= $1
+       RETURNING creditos`,
+      [estancias, req.usuario.id]
+    );
+    if (upd.length === 0) {
+      return res.status(402).json({ ok: false, error: 'Créditos insuficientes', creditos: rows[0].creditos });
+    }
+    const saldoNuevo = upd[0].creditos;
+
+    // Auditoría (best-effort: si falla no bloquea el descuento)
+    try {
+      await db.query(
+        `INSERT INTO movimientos_creditos (usuario_id, tipo, cantidad, saldo_anterior, saldo_posterior, descripcion)
+         VALUES ($1, 'consumo', $2, $3, $4, $5)`,
+        [req.usuario.id, -estancias, saldoNuevo + estancias, saldoNuevo, `Presupuesto de ${estancias} estancia(s)`]
+      );
+    } catch (logErr) {
+      logger.warn('No se pudo registrar el movimiento de consumo', { error: logErr.message });
+    }
+
+    return res.json({ ok: true, creditos: saldoNuevo });
+  } catch (err) {
+    logger.error('Error consumiendo créditos', { error: err.message });
+    return res.status(500).json({ error: 'Error al consumir créditos' });
+  }
+});
+
 module.exports = router;
