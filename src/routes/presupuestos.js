@@ -112,8 +112,10 @@ router.get('/', autenticar, async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT id, referencia, total_estimado, estancias, nivel, calidad,
-              cliente_nombre, cliente_email, pdf_generado, creado_en,
-              datos->>'clienteDir' AS obra, datos->>'tipoPresupuesto' AS tipo
+              cliente_nombre, cliente_email, cliente_telefono, pdf_generado, creado_en,
+              datos->>'clienteDir' AS obra, datos->>'tipoPresupuesto' AS tipo,
+              datos->>'clienteNif' AS nif, datos->>'numPresupuesto' AS num_presu,
+              datos->>'fechaPresupuesto' AS fecha_presu
        FROM presupuestos
        WHERE usuario_id = $1
        ORDER BY creado_en DESC
@@ -155,6 +157,28 @@ router.get('/:id', autenticar, async (req, res) => {
     return res.json(rows[0]);
   } catch (err) {
     return res.status(500).json({ error: 'Error al obtener presupuesto' });
+  }
+});
+
+// ─────────────────────────────────────────
+// DELETE /presupuestos/:id — eliminar
+// ─────────────────────────────────────────
+router.delete('/:id', autenticar, async (req, res) => {
+  try {
+    const { rowCount } = await db.query(
+      'DELETE FROM presupuestos WHERE id = $1 AND usuario_id = $2',
+      [req.params.id, req.usuario.id]
+    );
+
+    if (rowCount === 0) {
+      return res.status(404).json({ error: 'Presupuesto no encontrado' });
+    }
+
+    logger.info('Presupuesto eliminado', { usuario_id: req.usuario.id, presupuesto: req.params.id });
+    return res.json({ ok: true });
+  } catch (err) {
+    logger.error('Error eliminando presupuesto', { error: err.message });
+    return res.status(500).json({ error: 'Error al eliminar presupuesto' });
   }
 });
 
